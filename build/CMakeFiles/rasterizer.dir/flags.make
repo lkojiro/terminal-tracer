@@ -6,7 +6,7 @@ CXX_DEFINES =
 
 CXX_INCLUDES = -I/Users/logankojiro/Documents/personal_projects/terminal_tracer/include
 
-CXX_FLAGSarm64 = -std=gnu++17 -arch arm64 -Wall -Wextra -O2
+CXX_FLAGSarm64 = -std=gnu++20 -arch arm64 -Wall -Wextra -O2
 
-CXX_FLAGS = -std=gnu++17 -arch arm64 -Wall -Wextra -O2
+CXX_FLAGS = -std=gnu++20 -arch arm64 -Wall -Wextra -O2
 

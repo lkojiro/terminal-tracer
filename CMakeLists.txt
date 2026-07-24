@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(terminal_tracer CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Turn on decent warnings — catching bugs at compile time saves you
@@ -14,3 +14,18 @@ add_executable(rasterizer
 )
 
 target_include_directories(rasterizer PRIVATE include)
+
+# --- Tests ---
+# Zero-dependency unit tests (see include/test_framework.hpp).
+enable_testing()
+
+add_executable(run_tests
+    tests/test_main.cpp
+    tests/test_math.cpp
+)
+
+target_include_directories(run_tests PRIVATE include)
+
+# Registers run_tests with ctest, so `ctest --output-on-failure` works
+# from the build directory in addition to running the binary directly.
+add_test(NAME unit_tests COMMAND run_tests)

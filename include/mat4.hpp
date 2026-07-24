@@ -1,5 +1,6 @@
 #pragma once
 #include <cmath>
+#include <numbers>
 #include "vec3.hpp"
 
 // Column-major 4x4 matrix — m[col][row]. This matches the convention
@@ -58,18 +59,24 @@ struct Mat4 {
         return r;
     }
 
-    // --- TODO(you): rotateY ---
-    // Build a rotation matrix around the Y axis for angle `radians`.
-    // This is what will make the cube spin for your week-1 milestone.
-    //
-    // Think about: which two axes does a Y-rotation actually mix
-    // together, and where do sin/cos and their signs need to go so
-    // the rotation goes the direction you expect? Sketch it on paper
-    // with a unit vector on the X axis before you write the matrix —
-    // it'll save you a debugging headache later.
+    // rotate radians around y-axis
     static Mat4 rotateY(float radians) {
-        (void)radians;
-        return identity(); // replace with your rotation matrix
+        Mat4 roty;
+        
+        roty.m[0][0] = std::cos(radians);
+        roty.m[0][1] = 0;
+        roty.m[0][2] = -1 * std::sin(radians);
+        
+        roty.m[1][0] = 0;
+        roty.m[1][1] = 1;
+        roty.m[1][2] = 0;
+        
+        roty.m[2][0] = std::sin(radians);
+        roty.m[2][1] = 0;
+        roty.m[2][2] = std::cos(radians);
+        
+        roty.m[3][3] = 1;
+        return roty;
     }
 
     // --- TODO(you): perspective projection ---
@@ -97,7 +104,24 @@ struct Mat4 {
     // (right, up, forward) at the eye, then express world-space points
     // in terms of that basis.
     static Mat4 lookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
-        (void)eye; (void)target; (void)up;
-        return identity(); // replace with your view matrix
+        // if eye == target, camera is looking at itself. just point it in a direction so we don't crash here
+        Vec3 diff = eye - target;
+        Vec3 zaxis = (diff.length() > 1e-6f) ? diff.normalized() : Vec3(0, 0, 1);
+    
+        zaxis = (eye - target).normalized(); // 'forward' -> z axis facing away from the direction the camera is 'looking'
+        Vec3 xaxis = up.cross(zaxis).normalized(); // 'right'
+        Vec3 yaxis = zaxis.cross(xaxis); // 'up'
+        
+        // set the orientation matrix
+        Mat4 orientation;
+        orientation.m[0][0] = xaxis.x; orientation.m[1][0] = xaxis.y; orientation.m[2][0] = xaxis.z;
+        orientation.m[0][1] = yaxis.x; orientation.m[1][1] = yaxis.y; orientation.m[2][1] = yaxis.z;
+        orientation.m[0][2] = zaxis.x; orientation.m[1][2] = zaxis.y; orientation.m[2][2] = zaxis.z;
+        orientation.m[3][3] = 1;
+
+        // Translation: move the world so eye lands at the origin.
+        Mat4 translation = Mat4::translate(-eye.x, -eye.y, -eye.z);
+
+        return orientation * translation;
     }
 };
