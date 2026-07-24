@@ -1,0 +1,3 @@
+/Users/logankojiro/Documents/personal_projects/terminal_tracer/build/CMakeFiles/rasterizer.dir
+/Users/logankojiro/Documents/personal_projects/terminal_tracer/build/CMakeFiles/edit_cache.dir
+/Users/logankojiro/Documents/personal_projects/terminal_tracer/build/CMakeFiles/rebuild_cache.dir
