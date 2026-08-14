@@ -259,6 +259,71 @@ static const std::vector<std::pair<int, int>> cubeEdges = {
     {0,4}, {1,5}, {2,6}, {3,7}, // connecting edges
 };
 
+// ---------------------------------------------------------------
+// Camera: eye position, look-at target, up vector, and projection
+// params (fov/near/far). right()/forward() derive the camera's
+// basis vectors from pos/target/up each time they're called, the
+// same way lookAt() derives them internally -- so arrow-key
+// rotation axes stay camera-relative even if pos/target ever move.
+// ---------------------------------------------------------------
+struct Camera {
+    Vec3 pos;
+    Vec3 target;
+    Vec3 up;
+    float fovY;
+    float nearZ, farZ;
+
+    Vec3 forward() const { return (pos - target).normalized(); }
+    Vec3 right() const { return up.cross(forward()).normalized(); }
+
+    Mat4 viewMatrix() const { return Mat4::lookAt(pos, target, up); }
+    Mat4 projMatrix(float aspect) const { return Mat4::perspective(fovY, aspect, nearZ, farZ); }
+};
+
+// ---------------------------------------------------------------
+// Full per-frame pipeline for one wireframe mesh: model -> view ->
+// proj -> perspective divide -> viewport, then draw edges between
+// the transformed screen-space points.
+// ---------------------------------------------------------------
+void render(Framebuffer& fb, const std::vector<Vec3>& vertices,
+            const std::vector<std::pair<int, int>>& edges,
+            const Mat4& model, const Camera& camera) {
+    Mat4 view = camera.viewMatrix();
+    // project with our camera fov and the screen aspect ratio (uncorrected --
+    // char-aspect correction happens below, in the viewport step)
+    Mat4 proj = camera.projMatrix((float)fb.width / fb.height);
+    Mat4 mvp = proj * view * model;
+
+    // Transform each vertex through the full pipeline (model -> view ->
+    // proj -> perspective divide -> viewport) into integer pixel
+    // coordinates, once per frame.
+    std::vector<std::pair<int, int>> screenPoints;
+    screenPoints.reserve(vertices.size());
+    for (const Vec3& v : vertices) {
+        Vec4 clip = mvp * Vec4(v, 1.0f);
+
+        // Perspective divide: clip space -> normalized device coords.
+        float ndcX = clip.x / clip.w;
+        float ndcY = clip.y / clip.w;
+
+        // Viewport transform: NDC [-1,1] -> pixel coords, centered on
+        // the framebuffer. y is flipped (NDC grows up, framebuffer rows
+        // grow down) and compressed by 0.5 to correct for terminal
+        // characters being roughly twice as tall as they are wide.
+        int px = int(fb.width / 2.0f + ndcX * (fb.width / 2.0f));
+        int py = int(fb.height / 2.0f - ndcY * (fb.height / 2.0f) * 0.5f);
+
+        screenPoints.push_back({px, py});
+    }
+
+    // Draw each edge between its two transformed screen-space endpoints.
+    for (const auto& edge : edges) {
+        const auto& [x0, y0] = screenPoints[edge.first];
+        const auto& [x1, y1] = screenPoints[edge.second];
+        drawLineBresenham(fb, x0, y0, x1, y1, '#');
+    }
+}
+
 int main() {
     struct winsize w;
     int screenWidth = 80;
@@ -293,32 +358,26 @@ int main() {
     // nonzero.
     Mat4 orientation = Mat4::identity();
 
-    // per frame matrices
-    Mat4 model, view, proj;
-
-    // camera position
-    Vec3 camera_pos = Vec3(0,0, 4);
-    Vec3 camera_target = Vec3(0,0,0);
-    Vec3 camera_up = Vec3(0,1,0); // also used as the left/right yaw axis, so it stays camera-relative
-    float camera_fovY = std::numbers::pi / 4;
-    float nearZ = 1.0f;
-    float farZ = 8.0f;
-
-    // Camera's actual right axis, derived the same way lookAt() derives it
-    // internally (up x forward). Used as the up/down pitch axis so it stays
-    // camera-relative rather than assuming it happens to equal world X.
-    Vec3 camera_forward = (camera_pos - camera_target).normalized();
-    Vec3 camera_right = camera_up.cross(camera_forward).normalized();
+    // Camera: eye position, look-at target, up vector, and projection
+    // params. right()/forward() are derived on demand (see Camera above),
+    // so they stay accurate even if pos/target ever change at runtime.
+    Camera camera{
+        Vec3(0, 0, 4),         // pos
+        Vec3(0, 0, 0),         // target
+        Vec3(0, 1, 0),         // up -- also the left/right yaw axis
+        std::numbers::pi / 4,  // fovY
+        1.0f, 8.0f,            // nearZ, farZ
+    };
 
     while (true) {
         Key key = pollKey();
         if (key == Key::Space) break; // spacebar exits cleanly
 
         switch (key) {
-            case Key::Up:    orientation = Mat4::rotateAxis(camera_right, -arrowStep)  * orientation; break;
-            case Key::Down:  orientation = Mat4::rotateAxis(camera_right, arrowStep) * orientation; break;
-            case Key::Left:  orientation = Mat4::rotateAxis(camera_up, -arrowStep)    * orientation; break;
-            case Key::Right: orientation = Mat4::rotateAxis(camera_up, arrowStep)     * orientation; break;
+            case Key::Up:    orientation = Mat4::rotateAxis(camera.right(), -arrowStep) * orientation; break;
+            case Key::Down:  orientation = Mat4::rotateAxis(camera.right(), arrowStep)  * orientation; break;
+            case Key::Left:  orientation = Mat4::rotateAxis(camera.up, -arrowStep)      * orientation; break;
+            case Key::Right: orientation = Mat4::rotateAxis(camera.up, arrowStep)       * orientation; break;
             default: break;
         }
 
@@ -332,44 +391,8 @@ int main() {
         // Model transform: continuous auto-spin (Y) applied first/
         // innermost, then the accumulated manual orientation from arrow
         // keys on top.
-        model = orientation * Mat4::rotateY(angle);
-        // look at origin from camera, facing upwards
-        view = Mat4::lookAt(camera_pos, camera_target, camera_up);
-        // project with our camera fov and the screen aspect ratio (uncorrected --
-        // char-aspect correction happens below, in the viewport step)
-        proj = Mat4::perspective(camera_fovY, (float)screenWidth / screenHeight, nearZ, farZ);
-
-        Mat4 mvp = proj * view * model;
-
-        // Transform each cube vertex through the full pipeline (model -> view
-        // -> proj -> perspective divide -> viewport) into integer pixel
-        // coordinates, once per frame.
-        std::vector<std::pair<int, int>> screenPoints;
-        screenPoints.reserve(cubeVertices.size());
-        for (const Vec3& v : cubeVertices) {
-            Vec4 clip = mvp * Vec4(v, 1.0f);
-
-            // Perspective divide: clip space -> normalized device coords.
-            float ndcX = clip.x / clip.w;
-            float ndcY = clip.y / clip.w;
-
-            // Viewport transform: NDC [-1,1] -> pixel coords, centered on
-            // the framebuffer. y is flipped (NDC grows up, framebuffer rows
-            // grow down) and compressed by 0.5 to correct for terminal
-            // characters being roughly twice as tall as they are wide.
-            int px = int(screenWidth / 2.0f + ndcX * (screenWidth / 2.0f));
-            int py = int(screenHeight / 2.0f - ndcY * (screenHeight / 2.0f) * 0.5f);
-
-            screenPoints.push_back({px, py});
-        }
-
-        // Draw each cube edge between its two transformed screen-space
-        // endpoints.
-        for (const auto& edge : cubeEdges) {
-            const auto& [x0, y0] = screenPoints[edge.first];
-            const auto& [x1, y1] = screenPoints[edge.second];
-            drawLineBresenham(fb, x0, y0, x1, y1, '#');
-        }
+        Mat4 model = orientation * Mat4::rotateY(angle);
+        render(fb, cubeVertices, cubeEdges, model, camera);
 
         fb.present();
         std::this_thread::sleep_for(std::chrono::milliseconds(33));
