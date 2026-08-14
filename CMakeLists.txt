@@ -11,6 +11,7 @@ add_compile_options(-Wall -Wextra -O2)
 
 add_executable(rasterizer
     src/main.cpp
+    src/render.cpp
 )
 
 target_include_directories(rasterizer PRIVATE include)
