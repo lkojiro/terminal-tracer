@@ -79,6 +79,34 @@ struct Mat4 {
         return roty;
     }
 
+    // Rotate `radians` around an arbitrary axis, via Rodrigues' rotation
+    // formula: R = I*cos(theta) + sin(theta)*[axis]_x + (1-cos(theta))*(axis (x) axis),
+    // where [axis]_x is the cross-product matrix of axis and (x) is outer
+    // product. Right-handed, same sign convention as rotateY (plugging in
+    // axis=(0,1,0) reproduces rotateY exactly).
+    static Mat4 rotateAxis(const Vec3& axis, float radians) {
+        Vec3 a = axis.normalized();
+        float c = std::cos(radians);
+        float s = std::sin(radians);
+        float t = 1.0f - c;
+
+        Mat4 r;
+        r.m[0][0] = c + a.x * a.x * t;
+        r.m[1][0] = a.x * a.y * t - a.z * s;
+        r.m[2][0] = a.x * a.z * t + a.y * s;
+
+        r.m[0][1] = a.y * a.x * t + a.z * s;
+        r.m[1][1] = c + a.y * a.y * t;
+        r.m[2][1] = a.y * a.z * t - a.x * s;
+
+        r.m[0][2] = a.z * a.x * t - a.y * s;
+        r.m[1][2] = a.z * a.y * t + a.x * s;
+        r.m[2][2] = c + a.z * a.z * t;
+
+        r.m[3][3] = 1.0f;
+        return r;
+    }
+
     // --- TODO(you): perspective projection ---
     // Build a perspective projection matrix from:
     //   fovYRadians - vertical field of view
@@ -94,11 +122,23 @@ struct Mat4 {
     // exactly the kind of thing a graphics interview will ask you to
     // explain or derive on a whiteboard.
     static Mat4 perspective(float fovYRadians, float aspect, float nearZ, float farZ) {
-        (void)fovYRadians; (void)aspect; (void)nearZ; (void)farZ;
-        return identity(); // replace with your projection matrix
+        Mat4 r; // zero-initialized
+
+        float d = 1.0f / std::tan(fovYRadians / 2.0f);
+        float n = nearZ;
+        float f = farZ;
+
+        r.m[0][0] = d / aspect;
+        r.m[1][1] = d;
+        r.m[2][2] = (f + n) / (n - f);
+        r.m[3][2] = (2.0f * f * n) / (n - f);
+        r.m[2][3] = -1.0f;
+        // everything else stays 0 from Mat4's default init
+
+        return r;
     }
 
-    // --- TODO(you): lookAt / view matrix ---
+    // --- lookAt / view matrix ---
     // Build a view matrix from an eye position, a target to look at,
     // and an up vector. Conceptually: construct an orthonormal basis
     // (right, up, forward) at the eye, then express world-space points
