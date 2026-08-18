@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <utility>
+#include <array>
 
 #include "vec3.hpp"
 #include "mat4.hpp"
@@ -92,6 +93,9 @@ struct ScreenVertex {
 // Iterate only the triangle's screen-space bounding box (clamped to
 // the framebuffer dimensions), not the whole screen.
 // ---------------------------------------------------------------
+float edgeFunction(ScreenVertex a, ScreenVertex b, ScreenVertex c);
+bool isInside(ScreenVertex p, ScreenVertex a, ScreenVertex b, ScreenVertex c);
+
 void fillTriangle(Framebuffer& fb, const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c, char shade);
 
 // TODO(you): a triangle's face normal, from its three vertex
@@ -134,10 +138,15 @@ struct Camera {
 };
 
 // ---------------------------------------------------------------
-// Full per-frame pipeline for one wireframe mesh: model -> view ->
-// proj -> perspective divide -> viewport, then draw edges between
-// the transformed screen-space points.
+// Full per-frame pipeline for one solid-shaded mesh: model -> view ->
+// proj -> perspective divide -> viewport, per the usual stages, then
+// per triangle: back-face cull (faceNormal vs. direction to camera),
+// Lambertian-shade the survivors (lambertIntensity -> shadeChar), and
+// rasterize with fillTriangle so the z-buffer resolves overlaps.
+// `edges` is unused by this solid path (kept for callers that still
+// want wireframe via drawLine*) -- pass an empty vector if you don't.
 // ---------------------------------------------------------------
 void render(Framebuffer& fb, const std::vector<Vec3>& vertices,
             const std::vector<std::pair<int, int>>& edges,
+            const std::vector<std::array<int, 3>>& triangles,
             const Mat4& model, const Camera& camera);

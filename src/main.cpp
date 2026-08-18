@@ -191,7 +191,7 @@ int main() {
 //        fb.set(0, screenHeight-1, '#');                 // bottom-left
 //        fb.set(screenWidth-1, screenHeight-1, '#');     // bottom-right
 
-        render(fb, cubeVertices, cubeEdges, orientation, camera);
+        render(fb, cubeVertices, cubeEdges, cubeTriangles, orientation, camera);
 
         fb.present();
         std::this_thread::sleep_for(std::chrono::milliseconds(33));

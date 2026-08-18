@@ -23,6 +23,8 @@ enable_testing()
 add_executable(run_tests
     tests/test_main.cpp
     tests/test_math.cpp
+    tests/test_render.cpp
+    src/render.cpp
 )
 
 target_include_directories(run_tests PRIVATE include)

@@ -158,19 +158,103 @@ void drawLineWu(Framebuffer& fb, int x0, int y0, int x1, int y1) {
 
 // --- Triangle rasterization / lighting (stubs) ------------------------
 
+// test if point c is to the 'right' of line a-b (return a float so we can do line testing + barycentric coordinates for free
+// < 0 -> c to the left, = 0 -> on the line, > 0 -> to the right
+float edgeFunction(ScreenVertex a, ScreenVertex b, ScreenVertex c) {
+    return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
+}
+
+// is edge a->b a "top" or "left" edge of the triangle it belongs to?
+// top: exactly horizontal, running right-to-left. left: running downward.
+// (screen space has y increasing downward, so these fall out of which way
+// dx/dy point rather than the usual up-is-up intuition.)
+static bool isTopLeft(ScreenVertex a, ScreenVertex b) {
+    int dx = b.x - a.x;
+    int dy = b.y - a.y;
+    bool top = (dy == 0) && (dx < 0);
+    bool left = dy > 0;
+    return top || left;
+}
+
+// is point p inside triangle (a, b, c) ** in ccw order
+// Points exactly on a top or left edge count as inside; points exactly on
+// any other edge don't (the "top-left" fill rule). Without this, a pixel
+// sitting precisely on an edge shared by two triangles would either be
+// drawn twice (both triangles claim it) or not at all (both skip it),
+// depending on rounding -- top-left rule guarantees exactly one of the
+// two triangles sharing that edge claims it.
+bool isInside(ScreenVertex p, ScreenVertex a, ScreenVertex b, ScreenVertex c) {
+    float e0 = edgeFunction(a, b, p);
+    float e1 = edgeFunction(b, c, p);
+    float e2 = edgeFunction(c, a, p);
+
+    bool inside = true;
+    inside &= isTopLeft(a, b) ? (e0 >= 0) : (e0 > 0);
+    inside &= isTopLeft(b, c) ? (e1 >= 0) : (e1 > 0);
+    inside &= isTopLeft(c, a) ? (e2 >= 0) : (e2 > 0);
+
+    return inside;
+}
+
 void fillTriangle(Framebuffer& fb, const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c, char shade) {
-    (void)fb; (void)a; (void)b; (void)c; (void)shade;
-    // replace with your triangle rasterization + depth test
+    // render()'s viewport step flips y (NDC grows up, screen rows grow
+    // down), which would normally reverse a triangle's 2D winding on its
+    // way from model space to screen space. But edgeFunction's term order
+    // is already the mirror image of the textbook orient2d formula, so
+    // that flip and this one cancel out -- a triangle wound CCW in model
+    // space (see faceNormal / cubeTriangles) still satisfies isInside as
+    // (a, b, c), unswapped, once it lands in screen space.
+    float area = edgeFunction(a, b, c);
+    if (area == 0.0f) return; // zero-area triangle -- nothing to fill, and dividing by it below would be UB
+
+    int minX = std::max(0, std::min({a.x, b.x, c.x}));
+    int maxX = std::min(fb.width - 1, std::max({a.x, b.x, c.x}));
+    int minY = std::max(0, std::min({a.y, b.y, c.y}));
+    int maxY = std::min(fb.height - 1, std::max({a.y, b.y, c.y}));
+
+    // z isn't affine in screen space (perspective divide makes it
+    // non-linear), but 1/z is -- so interpolate the vertices' inverse
+    // depths and flip back at the end, rather than interpolating depth
+    // directly.
+    float invZa = 1.0f / a.depth;
+    float invZb = 1.0f / b.depth;
+    float invZc = 1.0f / c.depth;
+
+    for (int y = minY; y <= maxY; y++) {
+        for (int x = minX; x <= maxX; x++) {
+            ScreenVertex p{x, y, 0.0f};
+            if (!isInside(p, a, b, c)) continue;
+
+            // Barycentric weights: each vertex's weight is the signed area
+            // of the sub-triangle formed by p and that vertex's opposite
+            // edge, normalized by the triangle's total area.
+            float w0 = edgeFunction(b, c, p) / area; // weight of a
+            float w1 = edgeFunction(c, a, p) / area; // weight of b
+            float w2 = edgeFunction(a, b, p) / area; // weight of c
+
+            float invZ = w0 * invZa + w1 * invZb + w2 * invZc;
+            fb.setDepthTested(x, y, 1.0f / invZ, shade);
+        }
+    }
 }
 
 Vec3 faceNormal(const Vec3& a, const Vec3& b, const Vec3& c) {
-    (void)a; (void)b; (void)c;
-    return Vec3(0, 0, 0); // replace with your normal calculation
+    // a, b, c counter-clockwise
+    Vec3 ab = b - a;
+    Vec3 ac = c - a;
+
+    return ab.cross(ac);
 }
 
 float lambertIntensity(const Vec3& normal, const Vec3& lightDir) {
-    (void)normal; (void)lightDir;
-    return 0.0f; // replace with your lighting calculation
+    Vec3 normalized_normal = normal.normalized();
+    Vec3 normalized_lightDir = lightDir.normalized();
+    
+    // take the dot of the normalized vectors to clamp between [-1, 1]
+    float dot = normalized_normal.dot(normalized_lightDir);
+    
+    // clamp to [0, 1], negative numbers dropped
+    return std::max(0.0f, dot);
 }
 
 // --- Camera ------------------------------------------------------------
@@ -185,19 +269,37 @@ Mat4 Camera::projMatrix(float aspect) const { return Mat4::perspective(fovY, asp
 
 void render(Framebuffer& fb, const std::vector<Vec3>& vertices,
             const std::vector<std::pair<int, int>>& edges,
+            const std::vector<std::array<int, 3>>& triangles,
             const Mat4& model, const Camera& camera) {
+    (void)edges; // solid path below supersedes wireframe; unused for now
+
     Mat4 view = camera.viewMatrix();
     // project with our camera fov and the screen aspect ratio (uncorrected --
     // char-aspect correction happens below, in the viewport step)
     Mat4 proj = camera.projMatrix((float)fb.width / fb.height);
     Mat4 mvp = proj * view * model;
 
+    // A fixed world-space directional light, biased toward the camera
+    // (which sits on +Z looking at the origin) so that whichever faces
+    // survive back-face culling are generally the ones catching the
+    // light too -- an all-side light would leave whatever's currently
+    // facing the camera dark for a big chunk of the spin. Still offset
+    // off-axis (up and to the side) so shading isn't perfectly flat.
+    static const Vec3 lightDir{0.3f, 0.5f, 1.0f};
+
     // Transform each vertex through the full pipeline (model -> view ->
-    // proj -> perspective divide -> viewport) into integer pixel
-    // coordinates, once per frame.
-    std::vector<std::pair<int, int>> screenPoints;
+    // proj -> perspective divide -> viewport) into screen-space pixel
+    // coordinates, once per frame. Also keep the model-space -> world-space
+    // position around per vertex: faceNormal/back-face culling/lighting
+    // all need real (pre-projection) positions, not screen pixels.
+    std::vector<Vec3> worldPositions;
+    std::vector<ScreenVertex> screenPoints;
+    worldPositions.reserve(vertices.size());
     screenPoints.reserve(vertices.size());
     for (const Vec3& v : vertices) {
+        Vec4 world = model * Vec4(v, 1.0f);
+        worldPositions.push_back(Vec3(world.x, world.y, world.z));
+
         Vec4 clip = mvp * Vec4(v, 1.0f);
 
         // Perspective divide: clip space -> normalized device coords.
@@ -211,14 +313,30 @@ void render(Framebuffer& fb, const std::vector<Vec3>& vertices,
         int px = int(fb.width / 2.0f + ndcX * (fb.width / 2.0f));
         int py = int(fb.height / 2.0f - ndcY * (fb.height / 2.0f) * 0.5f);
 
-        screenPoints.push_back({px, py});
+        // clip.w is the view-space depth (distance in front of the
+        // camera) baked in by the perspective projection -- smaller is
+        // closer, matching setDepthTested()'s convention, and its
+        // reciprocal is exactly what fillTriangle interpolates for
+        // perspective-correct depth.
+        screenPoints.push_back(ScreenVertex{px, py, clip.w});
     }
 
-    // Draw each edge between its two transformed screen-space endpoints.
-    for (const auto& edge : edges) {
-        const auto& [x0, y0] = screenPoints[edge.first];
-        const auto& [x1, y1] = screenPoints[edge.second];
-//        drawLineBresenham(fb, x0, y0, x1, y1, '#');
-        drawLineWu(fb, x0, y0, x1, y1);
+    // Shade and rasterize each triangle, nearest-first ordering handled
+    // by fillTriangle's z-buffer test rather than by us.
+    for (const std::array<int, 3>& tri : triangles) {
+        const Vec3& wa = worldPositions[tri[0]];
+        const Vec3& wb = worldPositions[tri[1]];
+        const Vec3& wc = worldPositions[tri[2]];
+
+        Vec3 normal = faceNormal(wa, wb, wc);
+
+        // Back-face cull: skip triangles whose outward normal points away
+        // from the camera -- we'd only be looking at their back side.
+        Vec3 toCamera = camera.pos - wa;
+        if (normal.dot(toCamera) <= 0.0f) continue;
+
+        char shade = shadeChar(lambertIntensity(normal, lightDir));
+
+        fillTriangle(fb, screenPoints[tri[0]], screenPoints[tri[1]], screenPoints[tri[2]], shade);
     }
 }
