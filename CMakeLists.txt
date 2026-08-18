@@ -12,6 +12,7 @@ add_compile_options(-Wall -Wextra -O2)
 add_executable(rasterizer
     src/main.cpp
     src/render.cpp
+    src/obj_loader.cpp
 )
 
 target_include_directories(rasterizer PRIVATE include)
@@ -24,7 +25,9 @@ add_executable(run_tests
     tests/test_main.cpp
     tests/test_math.cpp
     tests/test_render.cpp
+    tests/test_obj_loader.cpp
     src/render.cpp
+    src/obj_loader.cpp
 )
 
 target_include_directories(run_tests PRIVATE include)

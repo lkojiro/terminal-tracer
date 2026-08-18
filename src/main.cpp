@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <utility>
 #include <numbers>
+#include <optional>
+#include <algorithm>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <termios.h>
@@ -13,6 +15,7 @@
 #include "vec3.hpp"
 #include "mat4.hpp"
 #include "render.hpp"
+#include "obj_loader.hpp"
 
 // ---------------------------------------------------------------
 // Raw-mode keyboard input: lets us poll for a keypress once per frame
@@ -56,7 +59,7 @@ struct RawTerminalInput {
     }
 };
 
-enum class Key { None, Space, Up, Down, Left, Right };
+enum class Key { None, Space, Up, Down, Left, Right, ZoomIn, ZoomOut };
 
 // Non-blocking: returns Key::None if nothing is waiting. Arrow keys
 // arrive as 3-byte escape sequences (ESC '[' A/B/C/D); everything
@@ -66,6 +69,8 @@ Key pollKey() {
     if (read(STDIN_FILENO, &c, 1) <= 0) return Key::None;
 
     if (c == ' ') return Key::Space;
+    if (c == 'z' || c == 'Z') return Key::ZoomIn;
+    if (c == 'x' || c == 'X') return Key::ZoomOut;
 
     if (c == '\x1b') {
         unsigned char seq[2];
@@ -114,7 +119,7 @@ static const std::vector<std::array<int, 3>> cubeTriangles = {
     {3,6,2}, {3,7,6}, // top    (y = +1)
 };
 
-int main() {
+int main(int argc, char** argv) {
     struct winsize w;
     int screenWidth = 80;
     int screenHeight = 40;
@@ -127,6 +132,30 @@ int main() {
         std::cerr << "Failed to get terminal size." << std::endl;
     }
 
+    // Geometry: load a mesh from an .obj file if one was given on the
+    // command line (`./rasterizer path/to/model.obj`), falling back to
+    // the built-in cube otherwise -- whether that's because no argument
+    // was given at all, or because the given file failed to load.
+    // `loadedMesh` owns the storage the pointers below point into, so it
+    // has to outlive the render loop.
+    std::optional<Mesh> loadedMesh;
+    static const std::vector<std::pair<int, int>> noEdges; // OBJ meshes don't carry a wireframe edge list
+    const std::vector<Vec3>* meshVertices = &cubeVertices;
+    const std::vector<std::pair<int, int>>* meshEdges = &cubeEdges;
+    const std::vector<std::array<int, 3>>* meshTriangles = &cubeTriangles;
+
+    if (argc > 1) {
+        loadedMesh = loadObj(argv[1]);
+        if (loadedMesh) {
+            fitToSize(*loadedMesh); // frame it like the cube, regardless of the file's original scale
+            meshVertices = &loadedMesh->vertices;
+            meshEdges = &noEdges;
+            meshTriangles = &loadedMesh->triangles;
+        } else {
+            std::cerr << "Falling back to the built-in cube.\n";
+        }
+    }
+
     Framebuffer fb(screenWidth, screenHeight);
     RawTerminalInput rawInput; // restores terminal settings on scope exit
 
@@ -135,6 +164,7 @@ int main() {
 
     float angle_step = 0.03f; // radians of auto-spin applied per frame
     float arrowStep = 0.08f;  // radians added/removed per keypress
+    float zoomStep = 0.2f;    // world units the camera moves along its own forward axis per keypress
     bool spinning = true;
 
     // Manual orientation from arrow keys, accumulated incrementally: each
@@ -177,6 +207,24 @@ int main() {
             case Key::Down:  orientation = Mat4::rotateAxis(camera.right(), arrowStep)  * orientation; break;
             case Key::Left:  orientation = Mat4::rotateAxis(camera.up, -arrowStep)      * orientation; break;
             case Key::Right: orientation = Mat4::rotateAxis(camera.up, arrowStep)       * orientation; break;
+            case Key::ZoomIn:
+            case Key::ZoomOut: {
+                // camera.forward() points from target toward pos (i.e.
+                // "backward", away from the scene) -- shrinking that
+                // distance moves pos toward the target (zoom in), growing
+                // it moves pos away (zoom out). Unclamped: zooming in far
+                // enough eventually passes through the target (forward()
+                // degenerates at distance 0) or pushes the model's own
+                // geometry past the near plane, which this renderer doesn't
+                // clip against -- so at extreme zoom, expect a flip through
+                // the target or near-plane artifacts rather than a hard
+                // stop.
+                float distance = (camera.pos - camera.target).length();
+                float delta = (key == Key::ZoomIn) ? -zoomStep : zoomStep;
+                distance = distance + delta;
+                camera.pos = camera.target + camera.forward() * distance;
+                break;
+            }
             default: break;
         }
 
@@ -191,7 +239,7 @@ int main() {
 //        fb.set(0, screenHeight-1, '#');                 // bottom-left
 //        fb.set(screenWidth-1, screenHeight-1, '#');     // bottom-right
 
-        render(fb, cubeVertices, cubeEdges, cubeTriangles, orientation, camera);
+        render(fb, *meshVertices, *meshEdges, *meshTriangles, orientation, camera);
 
         fb.present();
         std::this_thread::sleep_for(std::chrono::milliseconds(33));
