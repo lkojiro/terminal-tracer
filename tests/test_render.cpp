@@ -222,40 +222,80 @@ TEST(isInside_degenerate_triangle_accepts_nothing) {
 TEST(fillTriangle_paints_interior_leaves_outside_untouched) {
     Framebuffer fb(10, 10);
     ScreenVertex a{0, 0, 1.0f}, b{0, 8, 1.0f}, c{8, 0, 1.0f};
-    fillTriangle(fb, a, b, c, '#');
+    fillTriangle(fb, a, b, c, 1.0f);
+    fb.resolveMSAA();
 
-    CHECK(fb.chars[2 * fb.width + 2] == '#'); // (2,2) is interior
+    CHECK(fb.chars[2 * fb.width + 2] != ' '); // (2,2) is interior
     CHECK(fb.chars[9 * fb.width + 9] == ' '); // (9,9) is outside the triangle
 }
 
 TEST(fillTriangle_nearer_triangle_wins_regardless_of_draw_order) {
     ScreenVertex far0{0, 0, 5.0f}, far1{0, 8, 5.0f}, far2{8, 0, 5.0f};
     ScreenVertex near0{0, 0, 1.0f}, near1{0, 8, 1.0f}, near2{8, 0, 1.0f};
+    float farIntensity = 0.2f, nearIntensity = 0.9f;
+
+    // Reference: what the near triangle alone renders as, deep in its
+    // interior (fully covered, so no MSAA blending to complicate the
+    // comparison) -- what a correct depth test should match regardless
+    // of draw order, without this test needing to know shadeChar's
+    // internals to predict the exact glyph.
+    Framebuffer reference(10, 10);
+    fillTriangle(reference, near0, near1, near2, nearIntensity);
+    reference.resolveMSAA();
+    char nearAlone = reference.chars[2 * reference.width + 2];
+    CHECK(nearAlone != ' ');
 
     // Nearer (smaller depth) drawn second still wins over farther.
     Framebuffer fb1(10, 10);
-    fillTriangle(fb1, far0, far1, far2, 'F');
-    fillTriangle(fb1, near0, near1, near2, 'N');
-    CHECK(fb1.chars[2 * fb1.width + 2] == 'N');
+    fillTriangle(fb1, far0, far1, far2, farIntensity);
+    fillTriangle(fb1, near0, near1, near2, nearIntensity);
+    fb1.resolveMSAA();
+    CHECK(fb1.chars[2 * fb1.width + 2] == nearAlone);
 
     // Farther drawn second must not overwrite the nearer pixel already there.
     Framebuffer fb2(10, 10);
-    fillTriangle(fb2, near0, near1, near2, 'N');
-    fillTriangle(fb2, far0, far1, far2, 'F');
-    CHECK(fb2.chars[2 * fb2.width + 2] == 'N');
+    fillTriangle(fb2, near0, near1, near2, nearIntensity);
+    fillTriangle(fb2, far0, far1, far2, farIntensity);
+    fb2.resolveMSAA();
+    CHECK(fb2.chars[2 * fb2.width + 2] == nearAlone);
 }
 
-TEST(fillTriangle_interpolates_depth_via_inverse_z) {
+TEST(fillTriangle_interpolates_depth_via_inverse_z_per_sample) {
     // a=(0,0,z=1), b=(0,8,z=2), c=(8,0,z=4); area = 64 (see
     // edgeFunction_of_third_vertex_is_twice_triangle_area-style math).
-    // At p=(2,2), barycentric weights work out to (0.5, 0.25, 0.25) for
-    // (a, b, c) -- checked by hand via edgeFunction on each opposite edge.
-    // Depth should be interpolated in 1/z, then flipped back:
-    //   invZ = 0.5*(1/1) + 0.25*(1/2) + 0.25*(1/4) = 0.6875
-    //   z    = 1 / 0.6875 = 16/11
+    // fillTriangle's MSAA offsets place sample 0 of pixel (2,2) at
+    // (1.75, 1.75) (its {-0.25,-0.25} entry). Barycentric weights there
+    // work out to (9/16, 7/32, 7/32) for (a, b, c) -- checked by hand via
+    // edgeFunction on each opposite edge. Depth is interpolated in 1/z,
+    // then flipped back:
+    //   invZ = 9/16*(1/1) + 7/32*(1/2) + 7/32*(1/4) = 93/128
+    //   z    = 128/93
     Framebuffer fb(10, 10);
     ScreenVertex a{0, 0, 1.0f}, b{0, 8, 2.0f}, c{8, 0, 4.0f};
-    fillTriangle(fb, a, b, c, '#');
+    fillTriangle(fb, a, b, c, 1.0f);
 
-    CHECK_NEAR(fb.depth[2 * fb.width + 2], 16.0f / 11.0f, 1e-4f);
+    int sampleIdx = (2 * fb.width + 2) * Framebuffer::kMSAASamples + 0;
+    CHECK_NEAR(fb.sampleDepth[sampleIdx], 128.0f / 93.0f, 1e-4f);
+}
+
+TEST(fillTriangle_antialiases_partial_edge_coverage) {
+    // Triangle with a vertical edge exactly at x=5: a->b runs straight
+    // down that line, so at pixel (5, 10), the left-hand samples (x=4.75)
+    // fall just outside it and the right-hand samples (x=5.25) fall just
+    // inside -- exactly 2 of 4 samples covered, checked by hand against
+    // fillTriangle's {-0.25, +0.25} sample offsets. (b-c and c-a are both
+    // comfortably far from this pixel, so they don't affect its coverage.)
+    Framebuffer fb(25, 25);
+    ScreenVertex a{5, 0, 1.0f}, b{5, 20, 1.0f}, c{20, 0, 1.0f};
+    fillTriangle(fb, a, b, c, 1.0f);
+    fb.resolveMSAA();
+
+    // Reference: a pixel deep in the interior, fully covered by all 4
+    // samples -- the "no antialiasing needed" glyph.
+    char fullyCovered = fb.chars[10 * fb.width + 10];
+    CHECK(fullyCovered != ' ');
+
+    char edgeGlyph = fb.chars[10 * fb.width + 5];
+    CHECK(edgeGlyph != ' ');           // partially covered, not background
+    CHECK(edgeGlyph != fullyCovered);  // partial coverage -> a different (lighter) glyph
 }

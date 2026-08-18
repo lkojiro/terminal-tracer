@@ -6,15 +6,24 @@
 #include <algorithm>
 #include <limits>
 
+// Forward-declared so Framebuffer::resolveMSAA() (below) can use it;
+// defined further down alongside the rest of the line-drawing code it
+// was originally written for.
+static char shadeChar(float coverage);
+
 // --- Framebuffer ---------------------------------------------------
 
 Framebuffer::Framebuffer(int w, int h)
     : width(w), height(h), chars(w * h, ' '),
-      depth(w * h, std::numeric_limits<float>::infinity()) {}
+      depth(w * h, std::numeric_limits<float>::infinity()),
+      sampleDepth(w * h * kMSAASamples, std::numeric_limits<float>::infinity()),
+      sampleIntensity(w * h * kMSAASamples, 0.0f) {}
 
 void Framebuffer::clear() {
     std::fill(chars.begin(), chars.end(), ' ');
     std::fill(depth.begin(), depth.end(), std::numeric_limits<float>::infinity());
+    std::fill(sampleDepth.begin(), sampleDepth.end(), std::numeric_limits<float>::infinity());
+    std::fill(sampleIntensity.begin(), sampleIntensity.end(), 0.0f);
 }
 
 void Framebuffer::set(int x, int y, char c) {
@@ -28,6 +37,44 @@ void Framebuffer::setDepthTested(int x, int y, float d, char c) {
     if (d < depth[idx]) {
         depth[idx] = d;
         chars[idx] = c;
+    }
+}
+
+void Framebuffer::setSampleDepthTested(int x, int y, int sampleIdx, float d, float intensity) {
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
+    int idx = (y * width + x) * kMSAASamples + sampleIdx;
+    if (d < sampleDepth[idx]) {
+        sampleDepth[idx] = d;
+        sampleIntensity[idx] = intensity;
+    }
+}
+
+void Framebuffer::resolveMSAA() {
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int base = (y * width + x) * kMSAASamples;
+            float sum = 0.0f;
+            bool anyCovered = false;
+            float nearest = std::numeric_limits<float>::infinity();
+            for (int s = 0; s < kMSAASamples; s++) {
+                // An uncovered sample is still sitting at its cleared
+                // sentinel depth (infinity) -- no triangle ever claimed
+                // it this frame -- so it contributes 0 (background).
+                if (sampleDepth[base + s] < std::numeric_limits<float>::infinity()) {
+                    sum += sampleIntensity[base + s];
+                    nearest = std::min(nearest, sampleDepth[base + s]);
+                    anyCovered = true;
+                }
+            }
+            // Leave pixels no triangle touched alone this frame, so this
+            // composes with plain fb.set()/setDepthTested() writes rather
+            // than stomping them back to blank.
+            if (!anyCovered) continue;
+
+            int idx = y * width + x;
+            chars[idx] = shadeChar(sum / kMSAASamples);
+            depth[idx] = nearest;
+        }
     }
 }
 
@@ -158,10 +205,18 @@ void drawLineWu(Framebuffer& fb, int x0, int y0, int x1, int y1) {
 
 // --- Triangle rasterization / lighting (stubs) ------------------------
 
-// test if point c is to the 'right' of line a-b (return a float so we can do line testing + barycentric coordinates for free
-// < 0 -> c to the left, = 0 -> on the line, > 0 -> to the right
+// test if point (px, py) is to the 'right' of line a-b (return a float so we can do line testing + barycentric coordinates for free
+// < 0 -> point to the left, = 0 -> on the line, > 0 -> to the right
+//
+// Takes the point as raw coordinates rather than a ScreenVertex so it
+// can also be called with an MSAA subsample position, which isn't
+// pixel-grid-aligned and doesn't need a depth of its own.
+float edgeFunction(ScreenVertex a, ScreenVertex b, float px, float py) {
+    return (px - a.x) * (b.y - a.y) - (py - a.y) * (b.x - a.x);
+}
+
 float edgeFunction(ScreenVertex a, ScreenVertex b, ScreenVertex c) {
-    return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
+    return edgeFunction(a, b, (float)c.x, (float)c.y);
 }
 
 // is edge a->b a "top" or "left" edge of the triangle it belongs to?
@@ -176,17 +231,17 @@ static bool isTopLeft(ScreenVertex a, ScreenVertex b) {
     return top || left;
 }
 
-// is point p inside triangle (a, b, c) ** in ccw order
+// is point (px, py) inside triangle (a, b, c) ** in ccw order
 // Points exactly on a top or left edge count as inside; points exactly on
 // any other edge don't (the "top-left" fill rule). Without this, a pixel
 // sitting precisely on an edge shared by two triangles would either be
 // drawn twice (both triangles claim it) or not at all (both skip it),
 // depending on rounding -- top-left rule guarantees exactly one of the
 // two triangles sharing that edge claims it.
-bool isInside(ScreenVertex p, ScreenVertex a, ScreenVertex b, ScreenVertex c) {
-    float e0 = edgeFunction(a, b, p);
-    float e1 = edgeFunction(b, c, p);
-    float e2 = edgeFunction(c, a, p);
+bool isInside(float px, float py, ScreenVertex a, ScreenVertex b, ScreenVertex c) {
+    float e0 = edgeFunction(a, b, px, py);
+    float e1 = edgeFunction(b, c, px, py);
+    float e2 = edgeFunction(c, a, px, py);
 
     bool inside = true;
     inside &= isTopLeft(a, b) ? (e0 >= 0) : (e0 > 0);
@@ -196,7 +251,11 @@ bool isInside(ScreenVertex p, ScreenVertex a, ScreenVertex b, ScreenVertex c) {
     return inside;
 }
 
-void fillTriangle(Framebuffer& fb, const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c, char shade) {
+bool isInside(ScreenVertex p, ScreenVertex a, ScreenVertex b, ScreenVertex c) {
+    return isInside((float)p.x, (float)p.y, a, b, c);
+}
+
+void fillTriangle(Framebuffer& fb, const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c, float intensity) {
     // render()'s viewport step flips y (NDC grows up, screen rows grow
     // down), which would normally reverse a triangle's 2D winding on its
     // way from model space to screen space. But edgeFunction's term order
@@ -220,20 +279,34 @@ void fillTriangle(Framebuffer& fb, const ScreenVertex& a, const ScreenVertex& b,
     float invZb = 1.0f / b.depth;
     float invZc = 1.0f / c.depth;
 
+    // MSAA: a 2x2 grid of subsample offsets around each pixel's sample
+    // point, symmetric so their average lands back on that point. Each
+    // subsample is tested and depth-resolved independently, so a pixel
+    // that's only partially covered by this triangle (its edge crosses
+    // through the pixel) ends up with only some of its samples set --
+    // that's what resolveMSAA() turns into a partial-coverage glyph.
+    static constexpr float offsets[Framebuffer::kMSAASamples][2] = {
+        {-0.25f, -0.25f}, {0.25f, -0.25f}, {-0.25f, 0.25f}, {0.25f, 0.25f}
+    };
+
     for (int y = minY; y <= maxY; y++) {
         for (int x = minX; x <= maxX; x++) {
-            ScreenVertex p{x, y, 0.0f};
-            if (!isInside(p, a, b, c)) continue;
+            for (int s = 0; s < Framebuffer::kMSAASamples; s++) {
+                float sx = x + offsets[s][0];
+                float sy = y + offsets[s][1];
+                if (!isInside(sx, sy, a, b, c)) continue;
 
-            // Barycentric weights: each vertex's weight is the signed area
-            // of the sub-triangle formed by p and that vertex's opposite
-            // edge, normalized by the triangle's total area.
-            float w0 = edgeFunction(b, c, p) / area; // weight of a
-            float w1 = edgeFunction(c, a, p) / area; // weight of b
-            float w2 = edgeFunction(a, b, p) / area; // weight of c
+                // Barycentric weights: each vertex's weight is the signed
+                // area of the sub-triangle formed by the sample point and
+                // that vertex's opposite edge, normalized by the
+                // triangle's total area.
+                float w0 = edgeFunction(b, c, sx, sy) / area; // weight of a
+                float w1 = edgeFunction(c, a, sx, sy) / area; // weight of b
+                float w2 = edgeFunction(a, b, sx, sy) / area; // weight of c
 
-            float invZ = w0 * invZa + w1 * invZb + w2 * invZc;
-            fb.setDepthTested(x, y, 1.0f / invZ, shade);
+                float invZ = w0 * invZa + w1 * invZb + w2 * invZc;
+                fb.setSampleDepthTested(x, y, s, 1.0f / invZ, intensity);
+            }
         }
     }
 }
@@ -335,8 +408,16 @@ void render(Framebuffer& fb, const std::vector<Vec3>& vertices,
         Vec3 toCamera = camera.pos - wa;
         if (normal.dot(toCamera) <= 0.0f) continue;
 
-        char shade = shadeChar(lambertIntensity(normal, lightDir));
+        // Leave this as a raw intensity rather than converting to a char
+        // here: fillTriangle's MSAA samples get resolved (and quantized to
+        // a glyph) per-pixel across possibly multiple triangles, not
+        // per-triangle.
+        float intensity = lambertIntensity(normal, lightDir);
 
-        fillTriangle(fb, screenPoints[tri[0]], screenPoints[tri[1]], screenPoints[tri[2]], shade);
+        fillTriangle(fb, screenPoints[tri[0]], screenPoints[tri[1]], screenPoints[tri[2]], intensity);
     }
+
+    // All triangles are in; blend each pixel's covered MSAA samples into
+    // its final antialiased glyph.
+    fb.resolveMSAA();
 }

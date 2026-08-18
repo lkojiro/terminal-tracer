@@ -17,6 +17,18 @@ struct Framebuffer {
     std::vector<char> chars;
     std::vector<float> depth; // per-pixel z-buffer, for solid triangle fill
 
+    // MSAA support for fillTriangle: each pixel is split into
+    // kMSAASamples sub-pixel sample points, each independently
+    // depth-tested against the geometry that lands on it. A triangle
+    // edge crossing the middle of a pixel then only covers some of that
+    // pixel's samples -- resolveMSAA() averages each pixel's covered
+    // samples' shaded intensity into one antialiased glyph (uncovered
+    // samples count as 0, i.e. background), instead of the pixel being
+    // all-or-nothing the way a single-sample test would leave it.
+    static constexpr int kMSAASamples = 4;
+    std::vector<float> sampleDepth;     // kMSAASamples entries per pixel
+    std::vector<float> sampleIntensity; // kMSAASamples entries per pixel
+
     Framebuffer(int w, int h);
 
     void clear();
@@ -28,6 +40,20 @@ struct Framebuffer {
     // plane). Updates the depth buffer on write so later triangles get
     // correctly occluded.
     void setDepthTested(int x, int y, float d, char c);
+
+    // Depth-tested write to a single MSAA subsample of pixel (x,y).
+    // sampleIdx must be in [0, kMSAASamples). Used by fillTriangle
+    // instead of setDepthTested so edge coverage survives to resolve time.
+    void setSampleDepthTested(int x, int y, int sampleIdx, float d, float intensity);
+
+    // Resolves this frame's MSAA subsamples into `chars`: for each pixel
+    // with at least one covered sample, averages the covered samples'
+    // intensity (uncovered ones count as 0) and maps it through
+    // shadeChar(). Pixels with no covered samples are left alone, so this
+    // composes with plain fb.set()/setDepthTested() writes (e.g. a future
+    // wireframe pass) rather than overwriting them. Call once per frame,
+    // after all fillTriangle calls and before present().
+    void resolveMSAA();
 
     void present() const;
 };
@@ -72,15 +98,15 @@ struct ScreenVertex {
 };
 
 // ---------------------------------------------------------------
-// TODO(you): fill a triangle given three already-projected/viewport-
-// transformed screen vertices. This is the solid-rendering counterpart
-// to drawLine -- instead of tracing an outline, decide which pixels
-// are *inside* the triangle and paint them, using
-// fb.setDepthTested() so nearer triangles correctly occlude farther
-// ones instead of just overwriting in draw order.
+// Fill a triangle given three already-projected/viewport-transformed
+// screen vertices. This is the solid-rendering counterpart to
+// drawLine -- instead of tracing an outline, decide which pixels are
+// *inside* the triangle and paint them, MSAA-sampled and depth-tested
+// via fb.setSampleDepthTested() so nearer triangles correctly occlude
+// farther ones instead of just overwriting in draw order.
 //
 // Classic approach (Pineda's edge-function algorithm): for a candidate
-// pixel (x,y), compute the signed area of each of the triangle's three
+// sample point, compute the signed area of each of the triangle's three
 // edges relative to that point (a 2D cross product per edge — same
 // shape of calculation as a dot/cross product, just in 2D). The point
 // is inside iff all three signs agree (consistently >=0 or <=0,
@@ -92,11 +118,24 @@ struct ScreenVertex {
 //
 // Iterate only the triangle's screen-space bounding box (clamped to
 // the framebuffer dimensions), not the whole screen.
+//
+// `intensity` is the triangle's already-computed (flat) shading value
+// in [0,1] rather than a final char -- resolveMSAA() is what quantizes
+// down to a glyph, once per pixel, after blending together whatever
+// mix of samples (this triangle's, another triangle's, or background)
+// ended up covering it. Quantizing per-triangle instead would make
+// antialiasing at a shared or silhouette edge meaningless: there'd be
+// no continuous value left to blend.
 // ---------------------------------------------------------------
 float edgeFunction(ScreenVertex a, ScreenVertex b, ScreenVertex c);
-bool isInside(ScreenVertex p, ScreenVertex a, ScreenVertex b, ScreenVertex c);
+// Same, but for a sample point that isn't pixel-grid-aligned (an MSAA
+// subsample), which only needs a position, not a full ScreenVertex.
+float edgeFunction(ScreenVertex a, ScreenVertex b, float px, float py);
 
-void fillTriangle(Framebuffer& fb, const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c, char shade);
+bool isInside(ScreenVertex p, ScreenVertex a, ScreenVertex b, ScreenVertex c);
+bool isInside(float px, float py, ScreenVertex a, ScreenVertex b, ScreenVertex c);
+
+void fillTriangle(Framebuffer& fb, const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c, float intensity);
 
 // TODO(you): a triangle's face normal, from its three vertex
 // positions (world-space, or model-space if you're consistent about

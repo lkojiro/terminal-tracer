@@ -160,7 +160,7 @@ int main() {
 
     // Idle-timeout auto-spin: any keystroke resets the clock and stops
     // auto-spin; once 3 seconds pass with no input, auto-spin kicks back in.
-    const auto idleTimeout = std::chrono::seconds(3);
+    const auto idleTimeout = std::chrono::seconds(2);
     auto lastInputTime = std::chrono::steady_clock::now();
 
     while (true) {
