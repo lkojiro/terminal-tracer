@@ -255,6 +255,67 @@ bool isInside(ScreenVertex p, ScreenVertex a, ScreenVertex b, ScreenVertex c) {
     return isInside((float)p.x, (float)p.y, a, b, c);
 }
 
+// --- Near/far clipping ------------------------------------------------
+
+// Signed distance from the near plane in clip space: positive (kept) on
+// the camera side of it. At exactly the near plane, z == -w (derivable
+// from Mat4::perspective's z/w rows at view-space z = -nearZ) -- so
+// "in front of the near plane" is z >= -w, i.e. z + w >= 0.
+static float nearSignedDistance(const Vec4& v) { return v.z + v.w; }
+
+// Signed distance from the far plane in clip space: positive (kept) on
+// the camera side of it. By the same derivation, z == w at exactly the
+// far plane, so "nearer than the far plane" is z <= w, i.e. w - z >= 0.
+static float farSignedDistance(const Vec4& v) { return v.w - v.z; }
+
+// Sutherland-Hodgman: clips a (convex, since it's always a triangle or a
+// clipped triangle) polygon against a single plane, given as a signed
+// distance function that's positive on the side to keep. Walks the
+// polygon's edges in order; a vertex on the inside is kept as-is, and
+// wherever consecutive vertices are on opposite sides, the edge is
+// replaced by the interpolated point that lands exactly on the plane --
+// interpolating the whole Vec4 together means the new point's w (and so
+// its later perspective divide) comes out correct automatically.
+static std::vector<Vec4> clipPolygonAgainstPlane(const std::vector<Vec4>& polygon, float (*signedDistance)(const Vec4&)) {
+    if (polygon.empty()) return {};
+
+    std::vector<Vec4> out;
+    for (size_t i = 0; i < polygon.size(); i++) {
+        const Vec4& current = polygon[i];
+        const Vec4& next = polygon[(i + 1) % polygon.size()];
+        float dCurrent = signedDistance(current);
+        float dNext = signedDistance(next);
+        bool currentInside = dCurrent >= 0.0f;
+        bool nextInside = dNext >= 0.0f;
+
+        if (currentInside) out.push_back(current);
+
+        if (currentInside != nextInside) {
+            // The edge crosses the plane -- dCurrent and dNext have
+            // opposite signs here, so this never divides by zero.
+            float t = dCurrent / (dCurrent - dNext);
+            out.push_back(current + (next - current) * t);
+        }
+    }
+    return out;
+}
+
+std::vector<std::array<Vec4, 3>> clipTriangleNearFar(const Vec4& a, const Vec4& b, const Vec4& c) {
+    std::vector<Vec4> polygon = {a, b, c};
+    polygon = clipPolygonAgainstPlane(polygon, nearSignedDistance);
+    polygon = clipPolygonAgainstPlane(polygon, farSignedDistance);
+
+    // Fan-triangulate whatever came out (0 vertices, or a triangle,
+    // quad, ... up to a heptagon in the worst case) -- same approach as
+    // obj_loader.cpp's n-gon faces, and for the same reason: it
+    // preserves the polygon's winding order.
+    std::vector<std::array<Vec4, 3>> triangles;
+    for (size_t i = 1; i + 1 < polygon.size(); i++) {
+        triangles.push_back({polygon[0], polygon[i], polygon[i + 1]});
+    }
+    return triangles;
+}
+
 void fillTriangle(Framebuffer& fb, const ScreenVertex& a, const ScreenVertex& b, const ScreenVertex& c, float intensity) {
     // render()'s viewport step flips y (NDC grows up, screen rows grow
     // down), which would normally reverse a triangle's 2D winding on its
@@ -360,21 +421,25 @@ void render(Framebuffer& fb, const std::vector<Vec3>& vertices,
     // off-axis (up and to the side) so shading isn't perfectly flat.
     static const Vec3 lightDir{0.3f, 0.5f, 1.0f};
 
-    // Transform each vertex through the full pipeline (model -> view ->
-    // proj -> perspective divide -> viewport) into screen-space pixel
-    // coordinates, once per frame. Also keep the model-space -> world-space
+    // Transform each vertex through model -> view -> proj once per frame,
+    // stopping short of the perspective divide: clipping (below, per
+    // triangle) has to happen on these clip-space positions, before
+    // dividing by w, not after. Also keep the model-space -> world-space
     // position around per vertex: faceNormal/back-face culling/lighting
-    // all need real (pre-projection) positions, not screen pixels.
+    // all need real (pre-projection) positions, not clip space.
     std::vector<Vec3> worldPositions;
-    std::vector<ScreenVertex> screenPoints;
+    std::vector<Vec4> clipPositions;
     worldPositions.reserve(vertices.size());
-    screenPoints.reserve(vertices.size());
+    clipPositions.reserve(vertices.size());
     for (const Vec3& v : vertices) {
         Vec4 world = model * Vec4(v, 1.0f);
         worldPositions.push_back(Vec3(world.x, world.y, world.z));
+        clipPositions.push_back(mvp * Vec4(v, 1.0f));
+    }
 
-        Vec4 clip = mvp * Vec4(v, 1.0f);
-
+    // Perspective divide + viewport transform for one clip-space vertex,
+    // shared between however many pieces a triangle gets clipped into.
+    auto toScreenVertex = [&](const Vec4& clip) -> ScreenVertex {
         // Perspective divide: clip space -> normalized device coords.
         float ndcX = clip.x / clip.w;
         float ndcY = clip.y / clip.w;
@@ -390,9 +455,11 @@ void render(Framebuffer& fb, const std::vector<Vec3>& vertices,
         // camera) baked in by the perspective projection -- smaller is
         // closer, matching setDepthTested()'s convention, and its
         // reciprocal is exactly what fillTriangle interpolates for
-        // perspective-correct depth.
-        screenPoints.push_back(ScreenVertex{px, py, clip.w});
-    }
+        // perspective-correct depth. Guaranteed positive here: every
+        // vertex reaching this point survived clipTriangleNearFar's near
+        // test (z >= -w), which also holds w > 0 as long as nearZ > 0.
+        return ScreenVertex{px, py, clip.w};
+    };
 
     // Shade and rasterize each triangle, nearest-first ordering handled
     // by fillTriangle's z-buffer test rather than by us.
@@ -405,16 +472,22 @@ void render(Framebuffer& fb, const std::vector<Vec3>& vertices,
 
         // Back-face cull: skip triangles whose outward normal points away
         // from the camera -- we'd only be looking at their back side.
+        // Cheaper than clipping, and unaffected by it, so it goes first.
         Vec3 toCamera = camera.pos - wa;
         if (normal.dot(toCamera) <= 0.0f) continue;
 
         // Leave this as a raw intensity rather than converting to a char
         // here: fillTriangle's MSAA samples get resolved (and quantized to
         // a glyph) per-pixel across possibly multiple triangles, not
-        // per-triangle.
+        // per-triangle. It's computed once per original face and reused
+        // for every clipped piece below -- clipping only cuts the
+        // geometry down, it doesn't change which way the face is lit.
         float intensity = lambertIntensity(normal, lightDir);
 
-        fillTriangle(fb, screenPoints[tri[0]], screenPoints[tri[1]], screenPoints[tri[2]], intensity);
+        auto clipped = clipTriangleNearFar(clipPositions[tri[0]], clipPositions[tri[1]], clipPositions[tri[2]]);
+        for (const std::array<Vec4, 3>& piece : clipped) {
+            fillTriangle(fb, toScreenVertex(piece[0]), toScreenVertex(piece[1]), toScreenVertex(piece[2]), intensity);
+        }
     }
 
     // All triangles are in; blend each pixel's covered MSAA samples into

@@ -45,5 +45,13 @@ struct Vec4 {
     Vec4(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
     Vec4(const Vec3& v, float w_) : x(v.x), y(v.y), z(v.z), w(w_) {}
 
+    // Needed to linearly interpolate a clip-space vertex (all 4
+    // components together, so a new vertex's w comes along for free) when
+    // clipping a triangle against the near/far planes -- see
+    // clipTriangleNearFar() in render.hpp.
+    Vec4 operator+(const Vec4& o) const { return {x + o.x, y + o.y, z + o.z, w + o.w}; }
+    Vec4 operator-(const Vec4& o) const { return {x - o.x, y - o.y, z - o.z, w - o.w}; }
+    Vec4 operator*(float s) const { return {x * s, y * s, z * s, w * s}; }
+
     Vec3 toVec3() const { return {x, y, z}; }
 };

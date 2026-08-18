@@ -59,7 +59,10 @@ struct RawTerminalInput {
     }
 };
 
-enum class Key { None, Space, Up, Down, Left, Right, ZoomIn, ZoomOut };
+enum class Key {
+    None, Space, Up, Down, Left, Right, ZoomIn, ZoomOut,
+    DecreaseNear, IncreaseNear, DecreaseFar, IncreaseFar,
+};
 
 // Non-blocking: returns Key::None if nothing is waiting. Arrow keys
 // arrive as 3-byte escape sequences (ESC '[' A/B/C/D); everything
@@ -71,6 +74,10 @@ Key pollKey() {
     if (c == ' ') return Key::Space;
     if (c == 'z' || c == 'Z') return Key::ZoomIn;
     if (c == 'x' || c == 'X') return Key::ZoomOut;
+    if (c == '[') return Key::DecreaseNear;
+    if (c == ']') return Key::IncreaseNear;
+    if (c == '-' || c == '_') return Key::DecreaseFar;
+    if (c == '=' || c == '+') return Key::IncreaseFar;
 
     if (c == '\x1b') {
         unsigned char seq[2];
@@ -162,9 +169,10 @@ int main(int argc, char** argv) {
     // Hide cursor for a cleaner animation; restore it on exit.
     std::fwrite("\x1b[?25l\x1b[2J", 1, 9, stdout);
 
-    float angle_step = 0.03f; // radians of auto-spin applied per frame
+    float angle_step = 0.01f; // radians of auto-spin applied per frame
     float arrowStep = 0.08f;  // radians added/removed per keypress
     float zoomStep = 0.2f;    // world units the camera moves along its own forward axis per keypress
+    float clipStep = 0.2f;    // world units nearZ/farZ move per keypress
     bool spinning = true;
 
     // Manual orientation from arrow keys, accumulated incrementally: each
@@ -186,6 +194,20 @@ int main(int argc, char** argv) {
         Vec3(0, 1, 0),         // up -- also the left/right yaw axis
         std::numbers::pi / 4,  // fovY
         1.0f, 8.0f,            // nearZ, farZ
+    };
+
+    // Keeps nearZ/farZ adjustment from producing an invalid frustum.
+    // Unlike the zoom clamp (a judgment call about how it looks),
+    // nearZ <= 0 or nearZ >= farZ isn't optional to guard against: both
+    // land directly in Mat4::perspective's (nearZ - farZ) denominator and
+    // 1/tan(fovY/2) terms, so they're a hard divide-by-zero/NaN, not just
+    // an ugly frustum.
+    auto clampNearFar = [&camera]() {
+        constexpr float kMinNear = 0.05f;
+        constexpr float kMinGap = 0.1f; // smallest allowed (farZ - nearZ)
+        camera.nearZ = std::max(kMinNear, camera.nearZ);
+        camera.farZ = std::max(camera.farZ, camera.nearZ + kMinGap);
+        camera.nearZ = std::min(camera.nearZ, camera.farZ - kMinGap);
     };
 
     // Idle-timeout auto-spin: any keystroke resets the clock and stops
@@ -213,18 +235,25 @@ int main(int argc, char** argv) {
                 // "backward", away from the scene) -- shrinking that
                 // distance moves pos toward the target (zoom in), growing
                 // it moves pos away (zoom out). Unclamped: zooming in far
-                // enough eventually passes through the target (forward()
-                // degenerates at distance 0) or pushes the model's own
-                // geometry past the near plane, which this renderer doesn't
-                // clip against -- so at extreme zoom, expect a flip through
-                // the target or near-plane artifacts rather than a hard
-                // stop.
+                // enough eventually passes through the target, at which
+                // point forward() degenerates to the zero vector (Vec3's
+                // near-zero-length guard) and pos gets stuck exactly on
+                // the target from then on, since target + 0*distance is
+                // always just target regardless of which way you zoom
+                // next. render() clips geometry against the near/far
+                // planes now, so this no longer produces on-screen
+                // garbage -- just an unrecoverable "camera frozen at the
+                // target" state.
                 float distance = (camera.pos - camera.target).length();
                 float delta = (key == Key::ZoomIn) ? -zoomStep : zoomStep;
                 distance = distance + delta;
                 camera.pos = camera.target + camera.forward() * distance;
                 break;
             }
+            case Key::DecreaseNear: camera.nearZ -= clipStep; clampNearFar(); break;
+            case Key::IncreaseNear: camera.nearZ += clipStep; clampNearFar(); break;
+            case Key::DecreaseFar:  camera.farZ  -= clipStep; clampNearFar(); break;
+            case Key::IncreaseFar:  camera.farZ  += clipStep; clampNearFar(); break;
             default: break;
         }
 
@@ -242,7 +271,7 @@ int main(int argc, char** argv) {
         render(fb, *meshVertices, *meshEdges, *meshTriangles, orientation, camera);
 
         fb.present();
-        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
         // Auto-spin, applied the same way as the arrow keys: left-
         // multiplied onto `orientation` (outermost, in the camera's

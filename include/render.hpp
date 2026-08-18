@@ -98,6 +98,32 @@ struct ScreenVertex {
 };
 
 // ---------------------------------------------------------------
+// Clips a triangle against the near and far planes, in clip space --
+// before the perspective divide, not after. The divide is undefined at
+// w=0 and flips every sign for w<0, so a triangle straddling the camera
+// (or stretching past the far plane) has to be cut down to the portion
+// actually between the two planes *before* dividing; dividing first and
+// trying to reject bad results after is what produces the on-screen
+// garbage this is meant to replace.
+//
+// Standard Sutherland-Hodgman polygon clip, run once per plane: walk
+// the polygon's edges in order, keeping each vertex that's on the
+// inside, and wherever an edge crosses the plane, replacing it with the
+// interpolated point that lands exactly on it. Interpolating the whole
+// clip-space Vec4 (x, y, z, and w together) means a new vertex's w
+// comes along for free -- no separate bookkeeping needed for
+// ScreenVertex::depth, which is just clip.w.
+//
+// A single convex plane can turn a triangle into at most a quad, so
+// clipping against two planes in sequence can produce up to 4
+// triangles; it can also produce as few as 0 (fully outside both
+// planes). Winding order is preserved throughout, so every returned
+// triangle can go straight into fillTriangle() the same way an
+// unclipped one would.
+// ---------------------------------------------------------------
+std::vector<std::array<Vec4, 3>> clipTriangleNearFar(const Vec4& a, const Vec4& b, const Vec4& c);
+
+// ---------------------------------------------------------------
 // Fill a triangle given three already-projected/viewport-transformed
 // screen vertices. This is the solid-rendering counterpart to
 // drawLine -- instead of tracing an outline, decide which pixels are
@@ -178,10 +204,12 @@ struct Camera {
 
 // ---------------------------------------------------------------
 // Full per-frame pipeline for one solid-shaded mesh: model -> view ->
-// proj -> perspective divide -> viewport, per the usual stages, then
-// per triangle: back-face cull (faceNormal vs. direction to camera),
-// Lambertian-shade the survivors (lambertIntensity -> shadeChar), and
-// rasterize with fillTriangle so the z-buffer resolves overlaps.
+// proj, then per triangle: back-face cull (faceNormal vs. direction to
+// camera), Lambertian-shade the survivors (lambertIntensity ->
+// shadeChar), clip against the near/far planes (clipTriangleNearFar,
+// which is why the perspective divide happens per clipped piece rather
+// than once up front), and rasterize with fillTriangle so the z-buffer
+// resolves overlaps.
 // `edges` is unused by this solid path (kept for callers that still
 // want wireframe via drawLine*) -- pass an empty vector if you don't.
 // ---------------------------------------------------------------

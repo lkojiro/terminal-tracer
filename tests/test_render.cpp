@@ -217,6 +217,84 @@ TEST(isInside_degenerate_triangle_accepts_nothing) {
     CHECK(!isInside(offLine, a, b, c));
 }
 
+// --- clipTriangleNearFar tests --------------------------------------------
+
+TEST(clipTriangleNearFar_fully_inside_both_planes_passes_through_unchanged) {
+    Vec4 a(0, 0, 0, 1), b(1, 0, 0, 1), c(0, 1, 0, 1); // z=0 is comfortably between -w and w
+    auto out = clipTriangleNearFar(a, b, c);
+    CHECK(out.size() == 1);
+    CHECK_NEAR(out[0][0].x, a.x, 1e-6f);
+    CHECK_NEAR(out[0][1].x, b.x, 1e-6f);
+    CHECK_NEAR(out[0][2].x, c.x, 1e-6f);
+}
+
+TEST(clipTriangleNearFar_fully_behind_near_plane_is_dropped) {
+    // z + w < 0 for all three -- entirely on the camera's near side.
+    Vec4 a(0, 0, -2, 1), b(1, 0, -2, 1), c(0, 1, -2, 1);
+    CHECK(clipTriangleNearFar(a, b, c).empty());
+}
+
+TEST(clipTriangleNearFar_fully_past_far_plane_is_dropped) {
+    // z > w for all three.
+    Vec4 a(0, 0, 2, 1), b(1, 0, 2, 1), c(0, 1, 2, 1);
+    CHECK(clipTriangleNearFar(a, b, c).empty());
+}
+
+TEST(clipTriangleNearFar_one_vertex_outside_near_produces_a_quad) {
+    // a is behind the near plane (z+w = -1 < 0); b, c are in front.
+    // Sutherland-Hodgman turns "1 vertex outside" into a quad (2
+    // triangles): the 2 inside vertices plus 2 new points where the
+    // edges through the outside vertex cross the plane.
+    Vec4 a(0, 0, -2, 1), b(1, 0, 0, 1), c(0, 1, 0, 1);
+    auto out = clipTriangleNearFar(a, b, c);
+    CHECK(out.size() == 2);
+    for (const auto& tri : out) {
+        for (const Vec4& v : tri) {
+            CHECK(v.z + v.w >= -1e-4f); // every returned vertex is on/in front of the near plane
+        }
+    }
+}
+
+TEST(clipTriangleNearFar_two_vertices_outside_near_produces_a_smaller_triangle) {
+    // a, b are behind the near plane; only c is in front.
+    Vec4 a(0, 0, -2, 1), b(1, 0, -2, 1), c(0, 1, 0, 1);
+    auto out = clipTriangleNearFar(a, b, c);
+    CHECK(out.size() == 1);
+    for (const Vec4& v : out[0]) {
+        CHECK(v.z + v.w >= -1e-4f);
+    }
+}
+
+TEST(clipTriangleNearFar_new_vertex_lands_exactly_on_the_near_plane) {
+    // Edge a->b crosses the near plane; the interpolated point should
+    // satisfy z + w == 0 (within float tolerance), not just "close
+    // enough to pass the >=0 test".
+    Vec4 a(0, 0, -3, 1), b(0, 0, 1, 1), c(1, 1, 0, 1); // a behind; b, c in front
+    auto out = clipTriangleNearFar(a, b, c);
+    bool foundBoundaryVertex = false;
+    for (const auto& tri : out) {
+        for (const Vec4& v : tri) {
+            if (std::fabs(v.z + v.w) < 1e-4f) foundBoundaryVertex = true;
+        }
+    }
+    CHECK(foundBoundaryVertex);
+}
+
+TEST(clipTriangleNearFar_clips_against_both_planes_together) {
+    // a is behind the near plane, b is beyond the far plane, c sits
+    // comfortably between both -- every returned vertex, regardless of
+    // how many pieces the double-clip produced, must satisfy both tests.
+    Vec4 a(0, 0, -3, 1), b(2, 2, 3, 1), c(1, 1, 0, 1);
+    auto out = clipTriangleNearFar(a, b, c);
+    CHECK(!out.empty());
+    for (const auto& tri : out) {
+        for (const Vec4& v : tri) {
+            CHECK(v.z + v.w >= -1e-4f); // near
+            CHECK(v.w - v.z >= -1e-4f); // far
+        }
+    }
+}
+
 // --- fillTriangle tests ---------------------------------------------------
 
 TEST(fillTriangle_paints_interior_leaves_outside_untouched) {
