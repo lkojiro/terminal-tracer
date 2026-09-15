@@ -87,6 +87,13 @@ void drawLineBresenham(Framebuffer& fb, int x0, int y0, int x1, int y1, char c);
 // to render.cpp) since a terminal cell can't be partially lit.
 void drawLineWu(Framebuffer& fb, int x0, int y0, int x1, int y1);
 
+// Maps a coverage/intensity fraction in [0,1] to one of a small set of
+// ASCII "density" glyphs (Paul Bourke's ramp), so anything that only has
+// a continuous brightness value -- Wu's line antialiasing, MSAA resolve,
+// or (see ascii_video.hpp) a video frame's per-pixel luminance -- has
+// something to quantize down to a terminal-displayable character.
+char shadeChar(float intensity);
+
 // A screen-space vertex, ready for triangle rasterization: pixel
 // coordinates plus a depth value for the z-buffer test. Interpolating
 // this depth across the triangle (via barycentric weights) is what lets

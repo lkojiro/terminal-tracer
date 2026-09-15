@@ -13,7 +13,21 @@ add_executable(rasterizer
     src/main.cpp
     src/render.cpp
     src/obj_loader.cpp
+    src/terminal_input.cpp
+    src/subprocess.cpp
+    src/video_source.cpp
+    src/audio_player.cpp
+    src/ascii_video.cpp
+    src/video_player.cpp
 )
+
+# Video player mode (`--video <youtube-url>`) shells out to yt-dlp/ffmpeg/
+# ffplay rather than linking a media library, so no new build dependency --
+# just runtime binaries that need to be on PATH. pthread is needed
+# explicitly on some platforms for std::thread/condition_variable, used by
+# frame_queue.hpp's BoundedQueue.
+find_package(Threads REQUIRED)
+target_link_libraries(rasterizer PRIVATE Threads::Threads)
 
 target_include_directories(rasterizer PRIVATE include)
 

@@ -6,10 +6,10 @@
 #include <algorithm>
 #include <limits>
 
-// Forward-declared so Framebuffer::resolveMSAA() (below) can use it;
-// defined further down alongside the rest of the line-drawing code it
-// was originally written for.
-static char shadeChar(float coverage);
+// Declared in render.hpp (public -- reused by ascii_video.cpp for video
+// frames, not just this file's line/MSAA antialiasing); defined further
+// down alongside the rest of the line-drawing code it was originally
+// written for.
 
 // --- Framebuffer ---------------------------------------------------
 
@@ -121,11 +121,7 @@ void drawLineBresenham(Framebuffer& fb, int x0, int y0, int x1, int y1, char c) 
     }
 }
 
-// Maps a coverage fraction in [0,1] to one of a small set of ASCII
-// "density" glyphs, so Wu's algorithm has something to antialias
-// *into* even though a terminal cell can't do real alpha blending.
-// File-local -- not part of render.hpp's public interface.
-static char shadeChar(float coverage) {
+char shadeChar(float coverage) {
     // ASCII-art density ramp from Paul Bourke
     static const char ramp[] = {
         ' ', '.', '\'', '`', '^', '"', ',', ':', ';', 'I', 'l', '!',

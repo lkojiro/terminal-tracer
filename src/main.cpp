@@ -3,6 +3,7 @@
 #include <thread>
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <utility>
 #include <numbers>
 #include <optional>
@@ -16,85 +17,8 @@
 #include "mat4.hpp"
 #include "render.hpp"
 #include "obj_loader.hpp"
-
-// ---------------------------------------------------------------
-// Raw-mode keyboard input: lets us poll for a keypress once per frame
-// without blocking on Enter. This is plumbing, not graphics theory —
-// implemented for you.
-//
-// By default stdin is line-buffered (ICANON) and echoes what you type
-// (ECHO) -- great for a shell, bad for a render loop, since std::cin
-// would block waiting for you to hit Enter. Putting the terminal into
-// raw mode disables both. Setting VMIN=0/VTIME=0 (still within
-// termios, no fcntl needed) makes read() return immediately with 0
-// bytes when nothing's been typed, instead of blocking -- that alone
-// is enough for a polling read.
-//
-// Deliberately NOT using fcntl(..., O_NONBLOCK) here: that flag lives
-// on the shared *open file description*, and for a real terminal,
-// stdin/stdout/stderr are almost always dup()'d from the same open()
-// call -- so making stdin non-blocking would silently make stdout
-// non-blocking too, causing present()'s writes to randomly drop or
-// truncate frames under load (which looks like a blank/corrupted
-// screen with no obvious cause).
-//
-// RAII restores the original settings on scope exit, whenever main()
-// exits, so a spacebar-triggered break still leaves the terminal
-// usable afterward.
-// ---------------------------------------------------------------
-struct RawTerminalInput {
-    termios original{};
-
-    RawTerminalInput() {
-        tcgetattr(STDIN_FILENO, &original);
-        termios raw = original;
-        raw.c_lflag &= ~(ICANON | ECHO);
-        raw.c_cc[VMIN] = 0;  // read() returns immediately...
-        raw.c_cc[VTIME] = 0; // ...even if 0 bytes are available
-        tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-    }
-
-    ~RawTerminalInput() {
-        tcsetattr(STDIN_FILENO, TCSANOW, &original);
-    }
-};
-
-enum class Key {
-    None, Space, Up, Down, Left, Right, ZoomIn, ZoomOut,
-    DecreaseNear, IncreaseNear, DecreaseFar, IncreaseFar,
-};
-
-// Non-blocking: returns Key::None if nothing is waiting. Arrow keys
-// arrive as 3-byte escape sequences (ESC '[' A/B/C/D); everything
-// else we care about is a single byte.
-Key pollKey() {
-    unsigned char c;
-    if (read(STDIN_FILENO, &c, 1) <= 0) return Key::None;
-
-    if (c == ' ') return Key::Space;
-    if (c == 'z' || c == 'Z') return Key::ZoomIn;
-    if (c == 'x' || c == 'X') return Key::ZoomOut;
-    if (c == '[') return Key::DecreaseNear;
-    if (c == ']') return Key::IncreaseNear;
-    if (c == '-' || c == '_') return Key::DecreaseFar;
-    if (c == '=' || c == '+') return Key::IncreaseFar;
-
-    if (c == '\x1b') {
-        unsigned char seq[2];
-        if (read(STDIN_FILENO, &seq[0], 1) <= 0) return Key::None;
-        if (read(STDIN_FILENO, &seq[1], 1) <= 0) return Key::None;
-        if (seq[0] == '[') {
-            switch (seq[1]) {
-                case 'A': return Key::Up;
-                case 'B': return Key::Down;
-                case 'C': return Key::Right;
-                case 'D': return Key::Left;
-            }
-        }
-    }
-
-    return Key::None;
-}
+#include "terminal_input.hpp"
+#include "video_player.hpp"
 
 // A unit cube, defined by its 8 corners. This is just data — no
 // need to reinvent it, the geometry itself isn't the learning goal.
@@ -127,6 +51,14 @@ static const std::vector<std::array<int, 3>> cubeTriangles = {
 };
 
 int main(int argc, char** argv) {
+    // A separate mode entirely: `./rasterizer --video <youtube-url>`
+    // skips the mesh/camera pipeline below altogether and hands off to
+    // the ASCII video player (video_player.cpp), which reuses only
+    // Framebuffer/shadeChar/RawTerminalInput/pollKey from it.
+    if (argc > 2 && std::string(argv[1]) == "--video") {
+        return runVideoPlayer(argv[2]);
+    }
+
     struct winsize w;
     int screenWidth = 80;
     int screenHeight = 40;
