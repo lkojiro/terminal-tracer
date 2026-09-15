@@ -3,7 +3,7 @@ class TerminalTracer < Formula
   homepage "https://github.com/lkojiro/terminal-tracer"
   url "https://github.com/lkojiro/terminal-tracer.git",
       tag:      "v0.1.0",
-      revision: "REPLACE_WITH_COMMIT_SHA_AT_TAG_TIME"
+      revision: "d6863cdaf10d8aa17cb941d3a8d0e0836660675f"
   version "0.1.0"
   license "MIT"
   head "https://github.com/lkojiro/terminal-tracer.git", branch: "main"
